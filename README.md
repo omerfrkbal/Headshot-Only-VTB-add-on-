@@ -18,15 +18,6 @@ About 300 lines, 6 classes in `src/com/headshotonly/`.
 
 What it does **not** do: no network access, no sockets, no processes started, no environment variables read. The only file it touches is `Zomboid/HeadshotOnly.properties` (created on first launch, holds the 4 settings below).
 
-## Config (`Zomboid/HeadshotOnly.properties`)
-
-| key | default | meaning |
-|---|---|---|
-| `nape_radius` | 0.16 | distance (m) from the neck-head line that counts as a headshot |
-| `nape_min` | 1.50 | fallback height (m) used only when bone data is unavailable |
-| `debug_hitboxes` | false | draw VTB hitboxes in game |
-| `verbose` | false | detailed console logging |
-
 ## Build
 
 You need a JDK and these jars from your own installs: `projectzomboid.jar` (game folder), the VTB jar and `ZombieBuddy.jar` (from their Workshop folders).
