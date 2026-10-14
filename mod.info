@@ -1,0 +1,9 @@
+name=Headshot Only (Viewpoint True Ballistics add-on)
+id=HeadshotOnly
+description=Zombies only die from headshots fired with Viewpoint True Ballistics. Requires ZombieBuddy (Java mod).
+versionMin=42.21
+require=\ZombieBuddy,\ViewpointTrueBallistics
+ZBVersionMin=2.3.0
+javaJarFile=media/java/client/HeadshotOnly.jar
+javaPkgName=com.headshotonly
+poster=poster.png
