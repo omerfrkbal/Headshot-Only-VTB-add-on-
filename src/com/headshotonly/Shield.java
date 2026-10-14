@@ -6,22 +6,31 @@ import vtb.api.ImpactEvents;
 import vtb.api.ImpactEvents.Impact;
 
 /**
- * Pre/post hook around Hit() for VTB bullets only (ImpactEvents.current() != null).
- * Head: health -> tiny so any damage kills. Body/limb: health -> huge so it cannot die,
- * afterwards health = max(oldHealth - damage, FLOOR).
+ * The headshot-only logic. Runs around Hit(), and only for VTB bullets
+ * (ImpactEvents.current() is null for everything else, so melee and other damage are ignored).
+ *
+ * Before the hit we change the zombie's health:
+ *   head hit:        set to almost zero, so any damage kills it
+ *   body/limb hit:   set to a huge value, so the hit cannot kill it
+ * After the hit we work out how much damage was dealt. A body hit puts the health back
+ * to (old health - damage), but never below FLOOR. So the zombie gets weaker, just not dead.
  */
 public final class Shield {
-    static final int HEAD = 2;           // VTB hit location id: 2 = head
-    static final int SPINE = 1;          // VTB hit location id: 1 = spine capsule (r=0.19, top 1.61 m)
-    /** A spine hit at/above this height over the zombie's feet counts as head (nape / skull base). */
+    // VTB hit location ids (Impact.ragdollPart)
+    static final int HEAD = 2;
+    // The spine volume is thick and reaches up near the skull, so a shot to the back of the
+    // neck is reported as SPINE, not HEAD. We re-check those hits ourselves (see enter()).
+    static final int SPINE = 1;
+    /** Fallback only: used when bone data can't be read. A spine hit this many metres above the feet counts as head. */
     static volatile double napeMin = 1.50;
+    /** Main setting: a spine hit this close (metres) to the neck-to-head bone line counts as a headshot. */
     static volatile double napeRadius = 0.16;
     static volatile boolean debugHitboxes = false;
-    static volatile boolean verbose = false;   // per-hit log lines; off by default (errors/config always print)
+    static volatile boolean verbose = false;   // log every hit to console.txt (errors always print)
     private static long cfgChecked, cfgStamp;
     private static java.io.File cfgFile;
 
-    /** Tunable without rebuilding: Zomboid/HeadshotOnly.properties  ->  nape_min=1.50 (metres above feet). */
+    /** Re-reads Zomboid/HeadshotOnly.properties if it changed (checked at most every 2 seconds). */
     static void poll() { loadConfig(); }
 
     private static void loadConfig() {
@@ -33,14 +42,14 @@ public final class Shield {
                 cfgFile = new java.io.File(System.getProperty("user.home"), "Zomboid" + java.io.File.separator + "HeadshotOnly.properties");
             if (!cfgFile.exists()) {
                 try (java.io.FileWriter w = new java.io.FileWriter(cfgFile)) {
-                    w.write("# metres above the zombie's feet; a spine hit at or above this counts as a headshot\n");
-                    w.write("# spine capsule top is 1.61 m, head capsule starts at 1.43 m. Lower = easier nape shots, but shoulders start counting\n");
+                    w.write("# fallback only, used when the zombie's bones can't be read: a spine hit this many metres above the feet counts as a headshot\n");
                     w.write("nape_min=1.50\n");
-                    w.write("# a spine hit within this many metres of the neck->head line counts as a headshot (follows the animation)\n");
+                    w.write("# a spine hit within this many metres of the neck-to-head bone line counts as a headshot (follows the animation)\n");
+                    w.write("# raise it if back-of-head shots miss, lower it if shoulder shots kill\n");
                     w.write("nape_radius=0.16\n");
-                    w.write("# true = draw VTB's hitbox volumes in game (VTB debug view)\n");
+                    w.write("# true = draw VTB's hitboxes in game\n");
                     w.write("debug_hitboxes=false\n");
-                    w.write("# true = log every hit (HEAD-check distances etc.) to console.txt, for tuning\n");
+                    w.write("# true = log every hit to console.txt, handy for tuning nape_radius\n");
                     w.write("verbose=false\n");
                 }
             }
@@ -58,37 +67,41 @@ public final class Shield {
             System.out.println("[HeadshotOnly] config error: " + t);
         }
     }
-    static final double LEVEL_M = 2.4494896; // VTB: metres per floor level
+    static final double LEVEL_M = 2.4494896;   // metres per floor level in VTB (z is counted in levels)
+    /** The zombie that last took a head hit, so HeadshotListener can finish it if needed. */
     static volatile Object lastHead;
-    static final float SHIELD = 5000f;
-    static final float FRAIL = 0.0001f;
-    static final float FLOOR = 0.05f;    // body hits can never push health below this
+    static final float SHIELD = 5000f;   // health during a body hit. Kept modest: very large floats lose precision
+    static final float FRAIL = 0.0001f;  // health during a head hit
+    static final float FLOOR = 0.05f;    // body hits never push health below this (5%)
 
+    /** Per-zombie bookkeeping for one hit. depth counts nested Hit() calls (both hook classes can fire). */
     private static final class State { int depth; float hp; boolean head; }
     private static final IdentityHashMap<Object, State> ACTIVE = new IdentityHashMap<>();
     private static Method getH, setH;
     private static Class<?> bound;
     private static int logged;
 
-    /** Per-hit tuning output; only when verbose=true in HeadshotOnly.properties. */
+    /** Debug output, only when verbose=true. */
     static void log(String s) {
         if (verbose) System.out.println("[HeadshotOnly] " + s);
     }
 
-    /** Errors always print. */
+    /** Always printed. */
     static void err(String s) { System.out.println("[HeadshotOnly] " + s); }
 
+    /** Called before Hit(): decide head or body, then set the zombie's health to match. */
     public static void enter(Object self) {
         try {
             Impact cur = ImpactEvents.current();
-            if (cur == null || cur.target != self) return;
+            if (cur == null || cur.target != self) return;   // not a VTB bullet aimed at this zombie
             if (!bind(self)) return;
             State st = ACTIVE.get(self);
-            if (st != null) { st.depth++; return; }
+            if (st != null) { st.depth++; return; }   // nested call, keep the first decision
             st = new State();
             st.depth = 1;
             st.hp = (Float) getH.invoke(self);
             st.head = cur.ragdollPart == HEAD;
+            // Spine hits near the neck are really back-of-head shots, so measure how far the hit is from the neck-to-head line
             if (!st.head && cur.ragdollPart == SPINE) {
                 double d = boneDistance(self, cur);
                 if (d >= 0) {
@@ -110,17 +123,18 @@ public final class Shield {
         }
     }
 
+    /** Called after Hit(): restore the health of a body hit (head hits are left to kill). */
     public static void exit(Object self) {
         try {
             State st = ACTIVE.get(self);
             if (st == null) return;
-            if (--st.depth > 0) return;
+            if (--st.depth > 0) return;   // still inside a nested call
             ACTIVE.remove(self);
             if (st.head) { if (verbose) log("HEAD applied, hp now " + getH.invoke(self)); return; }
             float after = (Float) getH.invoke(self);
-            float dmg = Math.max(0f, SHIELD - after);
+            float dmg = Math.max(0f, SHIELD - after);   // damage dealt = how far the shield value dropped
             float nh = Math.max(st.hp - dmg, FLOOR);
-            if (st.hp < FLOOR) nh = st.hp;           // already below floor: leave as is
+            if (st.hp < FLOOR) nh = st.hp;   // was already under the floor, don't raise it
             setH.invoke(self, nh);
             if (verbose) log("BODY applied: dmg=" + dmg + " hp " + st.hp + " -> " + nh);
         } catch (Throwable t) {
@@ -128,13 +142,14 @@ public final class Shield {
         }
     }
 
+    // Skeleton lookup. It uses the same game calls VTB uses to build its hitboxes, found through
+    // reflection because they aren't available when this jar is compiled.
 
-    // ---- skeleton lookup (same API VTB uses for its hitboxes) ----
     private static Method mBoneIdx, mBoneWorld, mGetAP;
     private static Class<?> cVec;
     private static boolean boneApiBroken;
 
-    /** Distance (m) from hit point to the neck->head-nub segment, or -1 if bones can't be read. */
+    /** Distance in metres from the hit point to the neck-to-head line, or -1 if the bones can't be read. */
     private static double boneDistance(Object ch, Impact cur) {
         if (boneApiBroken) return -1;
         try {
@@ -142,7 +157,7 @@ public final class Shield {
                 mGetAP = ch.getClass().getMethod("getAnimationPlayer");
                 Class<?> model = Class.forName("zombie.core.skinnedmodel.model.Model");
                 cVec = Class.forName("zombie.iso.Vector3");
-                // several overloads exist: pick (IsoGameCharacter-ish, int, Vector3)
+                // boneToWorldCoords has several overloads, pick the (character, int, Vector3) one
                 for (Method m : model.getMethods()) {
                     if (!m.getName().equals("boneToWorldCoords") || m.getParameterCount() != 3) continue;
                     Class<?>[] pt = m.getParameterTypes();
@@ -161,7 +176,7 @@ public final class Shield {
             if (neck == null || head == null) { once("bones missing: neck=" + (neck != null) + " head=" + (head != null)); return -1; }
             double[] a = neck;
             double[] b = bonePos(ch, ap, "Bip01_HeadNub");
-            if (b == null) {            // no nub bone: extend neck->head by 0.20 m to reach the skull top
+            if (b == null) {   // no head-tip bone: extend the neck-to-head direction 0.20 m to reach the top of the skull
                 double dx = head[0] - neck[0], dy = head[1] - neck[1], du = head[2] - neck[2];
                 double l = Math.sqrt(dx * dx + dy * dy + du * du);
                 if (l < 1e-6) { once("neck and head bones coincide"); return -1; }
@@ -177,18 +192,21 @@ public final class Shield {
         }
     }
 
+    // The "why we fell back to the height check" message is printed only once
     private static boolean onceDone;
     private static void once(String why) { if (!onceDone) { onceDone = true; System.out.println("[HeadshotOnly] bones fallback reason: " + why); } }
 
+    /** World position of a bone as {x, y, height}, all in metres, or null if the bone doesn't exist. */
     private static double[] bonePos(Object ch, Object ap, String name) throws Exception {
         int idx = (Integer) mBoneIdx.invoke(ap, name, -1);
         if (idx < 0) return null;
         Object v = cVec.getConstructor().newInstance();
         mBoneWorld.invoke(null, ch, idx, v);
         double x = cVec.getField("x").getFloat(v), y = cVec.getField("y").getFloat(v), z = cVec.getField("z").getFloat(v);
-        return new double[] { x, y, z * LEVEL_M };   // tiles == metres in VTB; z is in levels
+        return new double[] { x, y, z * LEVEL_M };   // x and y: 1 tile = 1 m. z is in levels, so convert to metres
     }
 
+    /** Shortest distance from point p to the line segment a-b. */
     private static double segDist(double px, double py, double pu, double[] a, double[] b) {
         double abx = b[0] - a[0], aby = b[1] - a[1], abu = b[2] - a[2];
         double apx = px - a[0], apy = py - a[1], apu = pu - a[2];
@@ -198,6 +216,7 @@ public final class Shield {
         return Math.sqrt(dx * dx + dy * dy + du * du);
     }
 
+    /** Looks up getHealth/setHealth once per class. Reflection, because the game's classes aren't on our compile path. */
     private static boolean bind(Object t) throws Exception {
         Class<?> c = t.getClass();
         if (c == bound) return true;

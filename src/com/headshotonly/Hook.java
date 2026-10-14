@@ -1,11 +1,11 @@
 package com.headshotonly;
 
-/** Touches VTB classes; only loaded from inside Main's try/catch. */
+/** The only place that touches VTB classes. Main calls it inside a try/catch so a missing VTB can't break loading. */
 final class Hook {
     static void install() {
-        Shield.poll();   // load config once up front
+        Shield.poll();   // read (or create) the config file right away
         vtb.api.ImpactEvents.addListener(new HeadshotListener());
-        // poll the config file so debug_hitboxes etc. apply live, without needing a hit first
+        // Re-read the config every 2 seconds, so edits (like debug_hitboxes) apply without a restart
         Thread t = new Thread(() -> {
             while (true) {
                 try { Shield.poll(); Thread.sleep(2000); } catch (InterruptedException e) { return; } catch (Throwable ignored) { }

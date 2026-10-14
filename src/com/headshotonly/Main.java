@@ -1,10 +1,17 @@
 package com.headshotonly;
 
-/** Entry point. Deliberately has NO direct reference to VTB classes so it always loads. */
+/**
+ * Entry point, called by ZombieBuddy when the jar loads.
+ *
+ * This class must not mention any VTB class. If a class references something that isn't
+ * loaded yet, the JVM fails the whole class and ZombieBuddy swallows the error, so the mod
+ * would silently do nothing. All VTB access lives in Hook, and we just retry until it works.
+ */
 public final class Main {
     public static void main(String[] args) {
         System.out.println("[HeadshotOnly] Main.main called (ZombieBuddy loaded this jar).");
         if (tryHook()) return;
+        // VTB may not be loaded yet: retry every 2 seconds for up to 2 minutes
         Thread t = new Thread(() -> {
             for (int i = 0; i < 60; i++) {
                 try { Thread.sleep(2000); } catch (InterruptedException e) { return; }

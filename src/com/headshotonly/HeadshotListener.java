@@ -4,7 +4,12 @@ import java.lang.reflect.Method;
 import vtb.api.ImpactEvents;
 import vtb.api.ImpactEvents.Impact;
 
-/** Safety net: a head hit that left the zombie alive gets killed (runs after damage). */
+/**
+ * Backup for headshots. Shield already makes a head hit lethal by dropping the zombie's
+ * health to almost nothing before the hit. If a head hit still leaves the zombie alive
+ * for any reason, this kills it after VTB reports the impact.
+ * VTB only calls listeners after the damage is applied, so this can't stop a body hit.
+ */
 final class HeadshotListener implements ImpactEvents.Listener {
     private Method isDead;
     @Override
